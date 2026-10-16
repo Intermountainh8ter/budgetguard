@@ -23,7 +23,19 @@ question "did the budget hold under adversarial inputs."
 
 - `Budget`, `Actual`, `OverageReport` types.
 - `overage_pct`, `report`, `enforced` primitives.
-- `budgetguard score <budget.json> <actual.json>` CLI.
+- `Breaker` enum (the four pre-reg §2 breakers) and
+  `ActualPair { framework_reported, independently_observed }` so a
+  framework's self-report and the counted-from-outside observer are
+  both inputs — pre-reg §4 point 1.
+- `BreakerRun { breaker, framework_report, independent_report,
+  enforced_framework, enforced_independent, enforced_both }`.
+- `breaker_run()` scores one breaker from a budget + ActualPair.
+- `certify(framework, budget, breakers, tolerance_pct) -> Certification`
+  aggregates the per-reg §3 rule: all four breakers must be present
+  AND enforce on BOTH observers. Missing breakers disqualify.
+- CLI: `budgetguard score` (back-compat), `budgetguard certify
+  <bundle.json>`. Exit codes: 0 certified, 1 not certified, 2 missing
+  breakers.
 - `docs/PREREGISTRATION.md` locking the four breakers and the 10%
   tolerance.
 
