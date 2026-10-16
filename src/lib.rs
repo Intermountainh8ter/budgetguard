@@ -4,6 +4,8 @@
 //! ran up. `overage_pct` is the pre-registered metric. `enforced` is
 //! the pre-registered gate.
 
+pub mod http;
+
 use serde::{Deserialize, Serialize};
 
 /// The declared budget for an agent run.
