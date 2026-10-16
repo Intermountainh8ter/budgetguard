@@ -168,6 +168,93 @@ pub fn certify(
     }
 }
 
+/// How a framework interprets `max_tokens`: prompt-only, or
+/// prompt+completion. Pre-reg §5: some frameworks silently flip
+/// between these across calls, which is itself a finding.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum TokenInterpretation {
+    /// `max_tokens` is a cap on prompt tokens only.
+    PromptOnly,
+    /// `max_tokens` is a cap on prompt + completion tokens combined.
+    PromptAndCompletion,
+}
+
+/// One call's recorded token split and its termination reason.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CallTokenSplit {
+    pub call_id: String,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    /// The framework's reported `max_tokens` ceiling for this call.
+    pub max_tokens: u64,
+    /// True iff the completion was truncated by the length cap (OpenAI's
+    /// `finish_reason: "length"`, Anthropic's `stop_reason: "max_tokens"`).
+    pub truncated_by_length: bool,
+}
+
+/// Infer the framework's token-interpretation from one call.
+///
+/// The signal is in two unambiguous shapes:
+///
+/// - **PromptOnly**: `prompt + completion > max_tokens`. The framework
+///   let the completion run past the cap, so `max_tokens` is a cap on
+///   prompt only.
+/// - **PromptAndCompletion**: the call was truncated by the length cap
+///   AND `prompt + completion == max_tokens`. The framework stopped the
+///   completion exactly at the combined cap.
+///
+/// Any other shape is `None` (uninformative).
+pub fn infer_interpretation(call: &CallTokenSplit) -> Option<TokenInterpretation> {
+    let combined = call.prompt_tokens.saturating_add(call.completion_tokens);
+    if combined > call.max_tokens {
+        Some(TokenInterpretation::PromptOnly)
+    } else if call.truncated_by_length && combined == call.max_tokens {
+        Some(TokenInterpretation::PromptAndCompletion)
+    } else {
+        None
+    }
+}
+
+/// Pre-reg §5 report: scan a sequence of calls, infer the
+/// interpretation on each one that distinguishes them, and flag the
+/// framework when the inferred interpretation changes.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct InterpretationReport {
+    pub framework: String,
+    pub n_calls: usize,
+    pub n_informative: usize,
+    pub n_prompt_only: usize,
+    pub n_prompt_and_completion: usize,
+    /// True iff at least one call was inferred PromptOnly AND at least
+    /// one was inferred PromptAndCompletion. Pre-reg §5: "flags
+    /// frameworks whose interpretation changes between calls."
+    pub interpretation_inconsistent: bool,
+}
+
+pub fn interpretation_report(
+    framework: &str,
+    calls: &[CallTokenSplit],
+) -> InterpretationReport {
+    let mut n_prompt_only = 0;
+    let mut n_combined = 0;
+    for c in calls {
+        match infer_interpretation(c) {
+            Some(TokenInterpretation::PromptOnly) => n_prompt_only += 1,
+            Some(TokenInterpretation::PromptAndCompletion) => n_combined += 1,
+            None => {}
+        }
+    }
+    let n_informative = n_prompt_only + n_combined;
+    InterpretationReport {
+        framework: framework.into(),
+        n_calls: calls.len(),
+        n_informative,
+        n_prompt_only,
+        n_prompt_and_completion: n_combined,
+        interpretation_inconsistent: n_prompt_only > 0 && n_combined > 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,5 +428,66 @@ mod tests {
         ];
         let c = certify("one-bad", &budget, &all, 10.0);
         assert!(!c.certified);
+    }
+
+    fn call(id: &str, prompt: u64, completion: u64, max: u64, truncated: bool) -> CallTokenSplit {
+        CallTokenSplit {
+            call_id: id.into(),
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            max_tokens: max,
+            truncated_by_length: truncated,
+        }
+    }
+
+    #[test]
+    fn infer_interpretation_prompt_only_when_combined_exceeds_cap() {
+        // Framework let completion run past max_tokens -> cap is on prompt only.
+        let c = call("x", 500, 2000, 1000, false);
+        assert_eq!(infer_interpretation(&c), Some(TokenInterpretation::PromptOnly));
+    }
+
+    #[test]
+    fn infer_interpretation_combined_when_truncated_at_the_cap() {
+        // Completion was truncated at exactly max_tokens - prompt.
+        let c = call("x", 100, 900, 1000, true);
+        assert_eq!(
+            infer_interpretation(&c),
+            Some(TokenInterpretation::PromptAndCompletion)
+        );
+    }
+
+    #[test]
+    fn infer_interpretation_none_when_completion_stops_naturally_inside_cap() {
+        let c = call("x", 100, 200, 1000, false);
+        assert_eq!(infer_interpretation(&c), None);
+    }
+
+    #[test]
+    fn interpretation_report_flags_inconsistent_framework() {
+        let calls = vec![
+            call("a", 500, 2000, 1000, false), // PromptOnly
+            call("b", 100, 900, 1000, true),   // PromptAndCompletion
+        ];
+        let r = interpretation_report("mixed-fw", &calls);
+        assert_eq!(r.n_calls, 2);
+        assert_eq!(r.n_informative, 2);
+        assert_eq!(r.n_prompt_only, 1);
+        assert_eq!(r.n_prompt_and_completion, 1);
+        assert!(r.interpretation_inconsistent);
+    }
+
+    #[test]
+    fn interpretation_report_consistent_when_only_one_variant_fires() {
+        let calls = vec![
+            call("a", 500, 2000, 1000, false), // PromptOnly
+            call("b", 400, 1800, 1000, false), // PromptOnly
+            call("c", 50, 100, 1000, false),   // uninformative, inside cap
+        ];
+        let r = interpretation_report("prompt-only-fw", &calls);
+        assert_eq!(r.n_informative, 2);
+        assert_eq!(r.n_prompt_only, 2);
+        assert_eq!(r.n_prompt_and_completion, 0);
+        assert!(!r.interpretation_inconsistent);
     }
 }
