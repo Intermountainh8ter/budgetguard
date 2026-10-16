@@ -1,6 +1,7 @@
 [package]
 name = "budgetguard"
-version = "0.0.1"
+version = "0.1.0"
+authors = ["Intermountainh8ter"]
 edition = "2021"
 license = "MIT"
 description = "Verify that agent frameworks actually honor declared budgets (tokens, tool calls, USD) under adversarial inputs."
